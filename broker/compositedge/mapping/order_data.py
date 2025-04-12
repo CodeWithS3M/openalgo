@@ -153,8 +153,9 @@ def transform_order_data(orders):
             "order_status": mapped_order_status,
             "timestamp": order.get("LastUpdateDateTime", "")
         }
-
+        print(f"Transformed order: {transformed_order}")
         transformed_orders.append(transformed_order)
+        
 
     return transformed_orders
 
