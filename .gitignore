@@ -1,4 +1,5 @@
 venopenalgo
+.venv/
 .env
 openalgo.db
 .env
@@ -12,7 +13,7 @@ Thumbs.db
 .idea/
 .python-version
 config.ini
-
+.venvv
 
 #DB Files, CSV Files and Log/Tmp Files
 

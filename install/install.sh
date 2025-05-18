@@ -78,8 +78,19 @@ generate_hex() {
 # Function to validate broker name
 validate_broker() {
     local broker=$1
-    local valid_brokers="fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,dhan,firstock,flattrade,fyers,icici,iifl,kotak,jainam,jainampro,paytm,shoonya,upstox,wisdom,zebu,zerodha"
+    local valid_brokers="fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,dhan,firstock,flattrade,fyers,groww,iifl,kotak,jainam,jainampro,paytm,pocketful,shoonya,upstox,wisdom,zebu,zerodha"
     if [[ $valid_brokers == *"$broker"* ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if broker is XTS based
+is_xts_broker() {
+    local broker=$1
+    local xts_brokers="fivepaisaxts,compositedge,iifl,jainam,jainampro,wisdom"
+    if [[ $xts_brokers == *"$broker"* ]]; then
         return 0
     else
         return 1
@@ -156,7 +167,7 @@ done
 
 # Get broker name
 while true; do
-    log_message "\nValid brokers: fivepaisa, aliceblue, angel, dhan, firstock,flattrade, fyers, icici, kotak, shoonya, upstox, zebu, zerodha" "$BLUE"
+    log_message "\nValid brokers: fivepaisa,fivepaisaxts,aliceblue,angel,compositedge,dhan,firstock,flattrade,fyers,groww,iifl,kotak,jainam,jainampro,paytm,pocketful,shoonya,upstox,wisdom,zebu,zerodha" "$BLUE"
     read -p "Enter your broker name: " BROKER_NAME
     if validate_broker "$BROKER_NAME"; then
         break
@@ -181,6 +192,20 @@ if [ -z "$BROKER_API_KEY" ] || [ -z "$BROKER_API_SECRET" ]; then
     exit 1
 fi
 
+# Check if the broker is XTS-based and ask for additional credentials if needed
+BROKER_API_KEY_MARKET=""
+BROKER_API_SECRET_MARKET=""
+if is_xts_broker "$BROKER_NAME"; then
+    log_message "\nThis broker ($BROKER_NAME) is XTS API-based and requires additional market data credentials." "$YELLOW"
+    read -p "Enter your broker market data API key: " BROKER_API_KEY_MARKET
+    read -p "Enter your broker market data API secret: " BROKER_API_SECRET_MARKET
+    
+    if [ -z "$BROKER_API_KEY_MARKET" ] || [ -z "$BROKER_API_SECRET_MARKET" ]; then
+        log_message "Error: Market data API credentials are required for XTS-based brokers" "$RED"
+        exit 1
+    fi
+fi
+
 # Generate random keys
 APP_KEY=$(generate_hex)
 API_KEY_PEPPER=$(generate_hex)
@@ -203,8 +228,13 @@ check_status "Failed to update system packages"
 
 # Install required packages including Certbot
 log_message "\nInstalling required packages..." "$BLUE"
-sudo apt-get install -y python3 python3-venv python3-pip nginx git software-properties-common
+sudo apt-get install -y python3 python3-venv python3-pip python3-full nginx git software-properties-common snapd
 check_status "Failed to install required packages"
+
+# Install uv using snap (global installation)
+log_message "\nInstalling uv package installer using snap..." "$BLUE"
+sudo snap install astral-uv --classic
+check_status "Failed to install uv via snap"
 
 # Install Certbot
 log_message "\nInstalling Certbot..." "$BLUE"
@@ -224,19 +254,38 @@ log_message "\nCloning OpenAlgo repository..." "$BLUE"
 sudo git clone https://github.com/marketcalls/openalgo.git $OPENALGO_PATH
 check_status "Failed to clone OpenAlgo repository"
 
-# Create and activate virtual environment
-log_message "\nSetting up Python virtual environment..." "$BLUE"
+# Create virtual environment using uv
+log_message "\nSetting up Python virtual environment with uv..." "$BLUE"
 if [ -d "$VENV_PATH" ]; then
     log_message "Warning: Virtual environment already exists, removing..." "$YELLOW"
     sudo rm -rf "$VENV_PATH"
 fi
-sudo python3 -m venv $VENV_PATH
-check_status "Failed to create virtual environment"
+# Create directory if it doesn't exist
+sudo mkdir -p $(dirname $VENV_PATH)
+# Create virtual environment using uv
+sudo uv venv $VENV_PATH
+check_status "Failed to create virtual environment with uv"
 
-# Install Python dependencies
-log_message "\nInstalling Python dependencies..." "$BLUE"
-sudo $VENV_PATH/bin/pip install -r $OPENALGO_PATH/requirements-nginx.txt
+# Install Python dependencies using uv (faster installation)
+log_message "\nInstalling Python dependencies with uv..." "$BLUE"
+# First activate the virtual environment path for uv
+ACTIVATE_CMD="source $VENV_PATH/bin/activate"
+# Install dependencies using uv within the virtual environment context
+sudo bash -c "$ACTIVATE_CMD && uv pip install -r $OPENALGO_PATH/requirements-nginx.txt"
 check_status "Failed to install Python dependencies"
+
+# Verify gunicorn and eventlet installation
+log_message "\nVerifying gunicorn and eventlet installation..." "$BLUE"
+if ! sudo bash -c "$ACTIVATE_CMD && pip freeze | grep -q 'gunicorn=='"; then
+    log_message "Installing gunicorn..." "$YELLOW"
+    sudo bash -c "$ACTIVATE_CMD && uv pip install gunicorn"
+    check_status "Failed to install gunicorn"
+fi
+if ! sudo bash -c "$ACTIVATE_CMD && pip freeze | grep -q 'eventlet=='"; then
+    log_message "Installing eventlet..." "$YELLOW"
+    sudo bash -c "$ACTIVATE_CMD && uv pip install eventlet"
+    check_status "Failed to install eventlet"
+fi
 
 # Configure .env file
 log_message "\nConfiguring environment file..." "$BLUE"
@@ -245,6 +294,13 @@ handle_existing "$OPENALGO_PATH/.env" "environment file" ".env file"
 sudo cp $OPENALGO_PATH/.sample.env $OPENALGO_PATH/.env
 sudo sed -i "s|YOUR_BROKER_API_KEY|$BROKER_API_KEY|g" $OPENALGO_PATH/.env
 sudo sed -i "s|YOUR_BROKER_API_SECRET|$BROKER_API_SECRET|g" $OPENALGO_PATH/.env
+
+# Update market data API credentials if the broker is XTS-based
+if is_xts_broker "$BROKER_NAME"; then
+    sudo sed -i "s|YOUR_BROKER_MARKET_API_KEY|$BROKER_API_KEY_MARKET|g" $OPENALGO_PATH/.env
+    sudo sed -i "s|YOUR_BROKER_MARKET_API_SECRET|$BROKER_API_SECRET_MARKET|g" $OPENALGO_PATH/.env
+fi
+
 sudo sed -i "s|http://127.0.0.1:5000|https://$DOMAIN|g" $OPENALGO_PATH/.env
 sudo sed -i "s|<broker>|$BROKER_NAME|g" $OPENALGO_PATH/.env
 sudo sed -i "s|3daa0403ce2501ee7432b75bf100048e3cf510d63d2754f952e93d88bf07ea84|$APP_KEY|g" $OPENALGO_PATH/.env
@@ -368,13 +424,20 @@ Description=OpenAlgo Gunicorn Daemon ($DEPLOY_NAME)
 After=network.target
 
 [Service]
+User=www-data
+Group=www-data
 WorkingDirectory=$OPENALGO_PATH
-Environment="PATH=$VENV_PATH/bin"
-ExecStart=$VENV_PATH/bin/gunicorn \
+# Simplified approach to ensure Python environment is properly loaded
+ExecStart=/bin/bash -c 'source $VENV_PATH/bin/activate && $VENV_PATH/bin/gunicorn \
     --worker-class eventlet \
     -w 1 \
     --bind unix:$SOCKET_FILE \
-    app:app
+    --log-level info \
+    app:app'
+# Restart settings
+Restart=always
+RestartSec=5
+TimeoutSec=60
 
 [Install]
 WantedBy=multi-user.target
